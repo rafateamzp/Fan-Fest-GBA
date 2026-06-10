@@ -34,5 +34,6 @@ Si deseas **actualizar** o generar nuevos datos:
 Actualmente incluye [12] ubicaciones en el Gran Buenos Aires. Los puntos se actualizan constantemente según confirmación de eventos.
 
 ---
+## Autoría
 *Desarrollado con ❤️ y R *
 * Rafael Zerpa / GeckoGIS *
