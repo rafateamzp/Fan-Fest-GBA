@@ -5281,124 +5281,156 @@ function asArray(value) {
             `;
         } catch (err) {
             console.error("Error Clima:", err);
-            return "<i style='color:red'>Error cargando clima. Revisa la conexión.</i>";
+            return "<i style='color:red'>⚠️ Error cargando clima. Revisa consola.</i>";
         }
     };
 
-    // 2. Esperar a que el mapa esté en el DOM y luego inyectar el comportamiento
-    // Usamos setInterval como fallback robusto si el evento load falla
+    // 2. Función auxiliar para obtener la instancia del mapa de cualquier manera posible
+    function findMapInstance() {
+        // Intento A: Buscar en jQuery data de cualquier elemento con clase leaflet-container
+        if (window.$ && $('.leaflet-container').length > 0) {
+            const mapData = $('.leaflet-container').data('leaflet-map');
+            if (mapData) return mapData;
+        }
+
+        // Intento B: Buscar en variables globales comunes de htmlwidgets
+        // A veces se guardan como window.L.map... o variables generadas
+        for (let key in window) {
+            if (typeof window[key] === 'object' && window[key] !== null && 
+                typeof window[key].getCenter === 'function') {
+                // Verificar si parece un mapa de Leaflet
+                if (window[key]._layers || window[key._container]) return window[key];
+            }
+        }
+
+        // Intento C: Buscar en el objeto 'L' global si tenemos acceso directo a todas las instancias
+        // Esto es menos común en widgets empaquetados, pero vale la pena
+        if (window.L && window.L.map && window.L.map._maps) {
+             return Object.values(window.L.map._maps)[0];
+        }
+
+        return null;
+    }
+
+    // 3. Inicializar listener cuando el mapa esté listo
     let attempts = 0;
-    const maxAttempts = 30; // Esperar unos segundos
+    const maxAttempts = 30; 
     
     const checkAndAttach = setInterval(() => {
         const mapContainer = document.querySelector('.leaflet-container');
         
         if (mapContainer && !mapContainer.__weatherAttached) {
-            // Marcar como procesado para no hacerlo mil veces
             mapContainer.__weatherAttached = true;
             
-            // Encontrar todos los marcadores actuales y futuros
-            // Truco: Escuchar cualquier click en un marcador dentro del mapa
+            // Encontrar instancia del mapa AHORA (antes de añadir listeners)
+            const mapInstance = findMapInstance();
             
-            console.log("✅ Mapa encontrado! Inyectando listener de clima...");
-            
-            // Usamos el evento 'click' en el contenedor del mapa y filtramos
-            // Leaflet emite eventos bubbless up, pero a veces necesitamos ser más específicos.
-            // Mejor aún: Intentar acceder a las capas directamente si es posible, 
-            // o confiar en que al hacer click en un marcador, su popup se abre y podemos interceptarlo.
-            
-            // ESTRATEGIA FINAL: Sobreescribir bindPopup de manera dinámica
-            // Si Leaflet está listo, modificamos el comportamiento de los marcadores existentes
-            const allMarkers = document.querySelectorAll('.leaflet-marker-icon, .leaflet-marker-shadow');
-            
-            // Si hay marcadores visibles ahora mismo
-            if (allMarkers.length > 0) {
-                console.log(`Detectados ${allMarkers.length} marcadores visibles.`);
-                // Nota: No podemos iterar sobre iconos HTML fácilmente para sacar lat/lng sin el objeto JS.
-                // Así que usaremos un event listener delegador en el contenedor del mapa.
+            if (!mapInstance) {
+                console.warn("⚠️ Se detectó el contenedor, pero NO se pudo encontrar la INSTANCIA del mapa. \nIntentaremos usar un fallback si se hace click.");
+            } else {
+                console.log("✅ ¡Instancia del mapa encontrada! Listo para cargar clima.");
             }
-            
-            // Listener Delegado: Cuando alguien hace click en algo, comprobamos si es un marcador
+
+            // Listener Delegado en el contenedor del mapa
             mapContainer.addEventListener('click', async function(e) {
-                // El objetivo puede ser el icono, el sombra, o el tooltip
                 let target = e.target;
                 
-                // Subir en el DOM hasta encontrar un icono o sombra
+                // Subir hasta encontrar un icono o sombra
                 while(target && target !== this && !target.classList.contains('leaflet-marker-icon') && !target.classList.contains('leaflet-marker-shadow')) {
                     target = target.parentElement;
                 }
                 
+                // Si hicimos click en un marcador
                 if (target && (target.classList.contains('leaflet-marker-icon') || target.classList.contains('leaflet-marker-shadow'))) {
-                    e.preventDefault(); // Evitar el click default del marcador
-                    e.stopPropagation();
                     
-                    // Necesitamos obtener lat/lng. 
-                    // Como no tenemos el objeto L.Marker fácil aquí, usaremos un hack:
-                    // Buscamos el marker asociado en el mundo de Leaflet mediante su ID o posición visual.
-                    // Pero hay una forma más segura si tenemos acceso al objeto mapa globalmente.
-                    
-                    // Intento de recuperar el objeto mapa desde el elemento
-                    // A veces htmlwidgets lo guarda en datasets
-                    let mapInstance = null;
-                    // Buscar en padres inmediatos
-                    let parent = target;
-                    while(parent && !mapInstance) {
-                        if(parent.classList && parent.classList.contains('leaflet-map-pane')) break; 
-                        // A veces el mapa está guardado en window si es el único
-                        // O buscamos el elemento padre que tenga el ID del widget
-                        if (parent.getAttribute('id')) {
-                             // Prueba común en htmlwidgets: $(element).data('leaflet-map')
-                             if (window.$ && window.$(parent).data('leaflet-map')) {
-                                 mapInstance = window.$(parent).data('leaflet-map');
-                             }
+                    // PREVENIR comportamiento default rápido
+                    // Nota: e.preventDefault() puede ser complicado aquí sin detener todo el mapa.
+                    // En su lugar, intentamos manejar el popup manualmente.
+
+                    let markerLayer = null;
+
+                    // SI tenemos la instancia del mapa, usamos el método interno de Leaflet
+                    // para saber qué capa está bajo el evento original
+                    if (mapInstance && e.originalEvent && e.originalEvent.target) {
+                        // A veces el evento original ya tiene el layer referenciado
+                        // O podemos buscarlo usando _layerId o similar si conocemos el ID
+                        // Pero lo más seguro es usar el objetivo del evento si es un marker
+                
+                        // Truco: Leaflet a veces guarda el layer en el evento si fue procesado por addEventListener interno
+                        // Si no, intentamos recuperar el layer basado en el elemento DOM
+                        // Esto es un hack para cuando no tenemos el layer directo
+                        
+                        // Intento de recuperación directa:
+                        // Muchos usuarios de htmlwidgets pierden la referencia del objeto L.Marker.
+                        // Pero e.originalEvent.target suele ser el mismo elemento HTML.
+                        
+                        // Vamos a asumir que si encontramos la instancia, podemos iterar sus capas
+                        // O mejor aún: ¿Puede el usuario pasar lat/lng desde R? 
+                        // Si no, necesitamos sacarlas de algún lado.
+                        
+                        // SOLUCIÓN DE EMERGENCIA: Si tenemos el elemento DOM (target), 
+                        // ¿podemos sacarle la posición visual? No fácil.
+                        
+                        // MEJOR ESTRATEGIA: 
+                        // Si tenemos mapInstance, intentamos ver si el evento trae el layer.
+                        // Si no, usamos un truco: buscar en el LayerManager del mapa por ID si existiera.
+                        
+                        // Pero hay una forma más simple: 
+                        // Si el widget se renderizó con datos lat/lng, esos datos están en el mundo JS.
+                        // Si no los tenemos, no hay forma mágica sin acceder al LayerManager interno.
+                        
+                        // Vamos a intentar acceder al LayerManager interno de Map (estándar en Leaflet)
+                        if (mapInstance.layerManager && mapInstance.layerManager._byCategory) {
+                            const markers = mapInstance.layerManager._byCategory['marker'];
+                            
+                            if (markers) {
+                                // Iterar sobre las claves (stamp) del mapa interno
+                                for (const stamp in markers) {
+                                    const layerInfo = markers[stamp];
+                                    const layer = layerInfo.layer || layerInfo; // Extraer capa real
+                                    
+                                    // Comparar si el elemento DOM del layer coincide con nuestro target
+                                    // El elemento DOM del marcador suele estar en _icon o _shadow
+                                    if ((layer._icon && layer._icon === target) || 
+                                        (layer._shadow && layer._shadow === target)) {
+                                        markerLayer = layer;
+                                        break;
+                                    }
+                                }
+                            }
                         }
-                        parent = parent.parentElement;
                     }
                     
-                    // Si encontramos el mapa, obtenemos el layer bajo el click
-                    if (mapInstance) {
-                        // Usar la API interna de Leaflet para saber qué layer está bajo el puntero
-                        // (esto requiere que el evento original tenga la info, pero a veces no la tiene bien)
+                    if (markerLayer && typeof markerLayer.getLatLng === 'function') {
+                        const latLng = markerLayer.getLatLng();
+                        console.log(`📍 Click en marcador: ${latLng.lat}, ${latLng.lng}`);
                         
-                        // ALTERNATIVA MÁS SENCILLA Y ROBUSTA:
-                        // Dado que el click ya ocurrió en el marcador, abrimos un popup temporal
-                        // y intentamos obtener las coordenadas del marcador clickeado manualmente.
-                        // ¿Cómo? Leaflet suele mantener un puntero en el elemento DOM si no se ha borrado.
+                        // Mostrar estado de carga temporal
+                        const loadingPopup = L.popup()
+                            .setLatLng(latLng)
+                            .setContent("<i>Cargando clima...</i>")
+                            .openOn(mapInstance);
                         
-                        // Vamos a intentar obtener el lat/lng del marcador clickeado usando la librería interna
-                        // Si no conseguimos el objeto Marker, usaremos la posición visual (más difícil).
+                        // Fetch datos
+                        const weatherHtml = await window.loadMarkerWeather(latLng.lat, latLng.lng);
                         
-                        // HACK: Intentamos obtener el objeto marker buscando en _layers del LayerManager
-                        // Sabemos que el usuario hizo click en el target.
-                        // leaflet suele poner el objeto layer en el evento e.originalEvent.layer (en algunos builds)
+                        // Actualizar contenido del popup
+                        loadingPopup.setContent(weatherHtml);
                         
-                        let markerLayer = e.originalEvent && e.originalEvent.target ? e.originalEvent.target : null;
-                        
-                        if (markerLayer && typeof markerLayer.getLatLng === 'function') {
-                            const latLng = markerLayer.getLatLng();
-                            const html = await window.loadMarkerWeather(latLng.lat, latLng.lng);
-                            
-                            // Crear un nuevo popup en esa ubicación
-                            const popup = L.popup().setLatLng(latLng).setContent(html).openOn(mapInstance);
-                            
-                            // Limpiar popup anterior si existe (opcional)
-                            setTimeout(() => { popup.closePopup(); }, 10000); // Cerrar auto tras 10s si no hay interacción
-                        } else {
-                            console.warn("No se pudo extraer el objeto Marker del evento.");
-                        }
                     } else {
-                        console.warn("No se encontró instancia del mapa para el marcador clickeado.");
+                        console.error("❌ No se pudo recuperar el objeto Layer de Leaflet para este marcador.");
+                        alert("Error: No se pudo identificar el punto. (Verifica consola)");
                     }
                 }
-            }, true); // Capturar fase para actuar antes del popup nativo
-                    
+            }, true); // Captura fase
+            
             clearInterval(checkAndAttach);
         } else if (attempts >= maxAttempts) {
-            console.warn("⚠️ Timeout: No se encontró el contenedor del mapa para inyectar el clima.");
+            console.warn("⚠️ Timeout: No se encontró el contenedor del mapa.");
             clearInterval(checkAndAttach);
         }
         attempts++;
-    }, 200); // Chequear cada 200ms
+    }, 200);
 
 })();
 </script>
