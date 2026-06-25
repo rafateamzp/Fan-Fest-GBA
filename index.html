@@ -5260,137 +5260,110 @@ function asArray(value) {
 <script type="application/htmlwidget-sizing" data-for="htmlwidget-356aad9a3339a32f0a49">{"viewer":{"width":"100%","height":400,"padding":0,"fill":true},"browser":{"width":"100%","height":400,"padding":0,"fill":true}}</script>
 <script>
 (function() {
-    // 1. Definir la función de clima (siempre debe existir antes de usarse)
-    window.loadMarkerWeather = async function(lat, lng) {
+    // === 1. Función de Clima (Inmutable) ===
+    window.fetchWeatherData = async function(lat, lng) {
         try {
             const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,apparent_temperature,precipitation_probability,wind_speed_10m&timezone=auto`;
             const res = await fetch(url);
-            if (!res.ok) throw new Error(`Error ${res.status}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const json = await res.json();
             const c = json.current;
             
             return `
-                <div style="font-family: Arial, sans-serif; font-size: 13px; padding: 5px;">
-                    <strong style="color: #2c3e50;">🌤️ Clima en Vivo</strong><br>
-                    <hr style="margin: 4px 0; border: 0; border-top: 1px solid #ddd;">
-                    🌡️ Temp: <span style="color:#e74c3c; font-weight:bold;">${c.temperature_2m}</span>°C<br>
-                    ✨ Sensación: <span style="color:#3498db;">${c.apparent_temperature}</span>°C<br>
-                    💧 Lluvia: <span style="color:#f39c12;">${c.precipitation_probability}%</span><br>
-                    💨 Viento: <span style="color:#2ecc71;">${c.wind_speed_10m} ${c.units.wind_speed || 'km/h'}</span>
+                <div style="font-family: Arial, sans-serif; font-size: 14px; padding: 8px; line-height: 1.5;">
+                    <strong style="color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 4px; display:block;">🌤️ Clima Actual</strong>
+                    <span style="display:flex; justify-content:space-between; margin-top:6px;">
+                        <span>🌡️ Temp:</span> <b style="color:#e74c3c">${c.temperature_2m}°C</b>
+                    </span>
+                    <span style="display:flex; justify-content:space-between;">
+                        <span>✨ Sensación:</span> <b style="color:#3498db">${c.apparent_temperature}°C</b>
+                    </span>
+                    <span style="display:flex; justify-content:space-between;">
+                        <span>💧 Lluvia:</span> <b style="color:#f39c12">${c.precipitation_probability}%</b>
+                    </span>
+                    <span style="display:flex; justify-content:space-between;">
+                        <span>💨 Viento:</span> <b style="color:#2ecc71">${c.wind_speed_10m} ${c.units?.wind_speed || 'km/h'}</b>
+                    </span>
                 </div>
             `;
         } catch (err) {
-            console.error("Error Clima:", err);
-            return "<i style='color:red'>⚠️ Error cargando clima. Revisa consola.</i>";
+            console.error("API Error:", err);
+            return "<i style='color:red'>⚠️ Error cargando clima.</i>";
         }
     };
 
-    // 2. Función auxiliar para obtener la instancia del mapa de cualquier manera posible
-    function findMapInstance() {
-        // Intento A: Buscar en jQuery data de cualquier elemento con clase leaflet-container
-        if (window.$ && $('.leaflet-container').length > 0) {
-            const mapData = $('.leaflet-container').data('leaflet-map');
-            if (mapData) return mapData;
-        }
-
-        // Intento B: Buscar en variables globales comunes de htmlwidgets
-        // A veces se guardan como window.L.map... o variables generadas
-        for (let key in window) {
-            if (typeof window[key] === 'object' && window[key] !== null && 
-                typeof window[key].getCenter === 'function') {
-                // Verificar si parece un mapa de Leaflet
-                if (window[key]._layers || window[key._container]) return window[key];
+    // === 2. Obtener instancia del mapa usando el ID específico ===
+    function getMapInstance() {
+        // Método A: Usar HTMLWidgets.find con el ID específico que vimos en consola
+        const mapId = 'htmlwidget-356aad9a3339a32f0a49';
+        try {
+            if (window.HTMLWidgets && window.HTMLWidgets.find) {
+                const mapInst = window.HTMLWidgets.find(document.getElementById(mapId));
+                if (mapInst && typeof mapInst.getCenter === 'function') {
+                    console.log("✅ Mapa encontrado vía HTMLWidgets.find()");
+                    return mapInst;
+                }
             }
-        }
+        } catch(e) { console.warn("HTMLWidgets.find falló:", e); }
 
-        // Intento C: Buscar en el objeto 'L' global si tenemos acceso directo a todas las instancias
-        // Esto es menos común en widgets empaquetados, pero vale la pena
-        if (window.L && window.L.map && window.L.map._maps) {
-             return Object.values(window.L.map._maps)[0];
+        // Método B: Buscar en window.LeafletWidget si existe
+        if (window.LeafletWidget && window.LeafletWidget.methods) {
+            // Las instancias pueden estar almacenadas aquí
+            for (let key in window) {
+                if (typeof window[key] === 'object' && window[key].getCenter) {
+                    return window[key];
+                }
+            }
         }
 
         return null;
     }
 
-    // 3. Inicializar listener cuando el mapa esté listo
+    // === 3. Inyectar comportamiento cuando el mapa esté listo ===
     let attempts = 0;
-    const maxAttempts = 30; 
+    const maxAttempts = 50;
     
-    const checkAndAttach = setInterval(() => {
+    const checkAndSetup = setInterval(() => {
         const mapContainer = document.querySelector('.leaflet-container');
         
-        if (mapContainer && !mapContainer.__weatherAttached) {
-            mapContainer.__weatherAttached = true;
+        if (mapContainer && !mapContainer.__weatherInjected) {
+            mapContainer.__weatherInjected = true;
             
-            // Encontrar instancia del mapa AHORA (antes de añadir listeners)
-            const mapInstance = findMapInstance();
+            const mapInst = getMapInstance();
             
-            if (!mapInstance) {
-                console.warn("⚠️ Se detectó el contenedor, pero NO se pudo encontrar la INSTANCIA del mapa. \nIntentaremos usar un fallback si se hace click.");
+            if (!mapInst) {
+                console.warn("⚠️ No se pudo obtener instancia del mapa. Intentando fallback.");
             } else {
-                console.log("✅ ¡Instancia del mapa encontrada! Listo para cargar clima.");
-            }
-
-            // Listener Delegado en el contenedor del mapa
-            mapContainer.addEventListener('click', async function(e) {
-                let target = e.target;
+                console.log("🎯 ¡MAPA ENCONTRADO! Instancia obtenida correctamente.");
                 
-                // Subir hasta encontrar un icono o sombra
-                while(target && target !== this && !target.classList.contains('leaflet-marker-icon') && !target.classList.contains('leaflet-marker-shadow')) {
-                    target = target.parentElement;
-                }
-                
-                // Si hicimos click en un marcador
-                if (target && (target.classList.contains('leaflet-marker-icon') || target.classList.contains('leaflet-marker-shadow'))) {
+                // Interceptamos todos los clicks en marcadores
+                mapContainer.addEventListener('click', async function(e) {
+                    let target = e.target;
                     
-                    // PREVENIR comportamiento default rápido
-                    // Nota: e.preventDefault() puede ser complicado aquí sin detener todo el mapa.
-                    // En su lugar, intentamos manejar el popup manualmente.
-
-                    let markerLayer = null;
-
-                    // SI tenemos la instancia del mapa, usamos el método interno de Leaflet
-                    // para saber qué capa está bajo el evento original
-                    if (mapInstance && e.originalEvent && e.originalEvent.target) {
-                        // A veces el evento original ya tiene el layer referenciado
-                        // O podemos buscarlo usando _layerId o similar si conocemos el ID
-                        // Pero lo más seguro es usar el objetivo del evento si es un marker
-                
-                        // Truco: Leaflet a veces guarda el layer en el evento si fue procesado por addEventListener interno
-                        // Si no, intentamos recuperar el layer basado en el elemento DOM
-                        // Esto es un hack para cuando no tenemos el layer directo
+                    // Subir hasta encontrar icono/sombra de marcador
+                    while(target && target !== this && !target.classList.contains('leaflet-marker-icon') && !target.classList.contains('leaflet-marker-shadow')) {
+                        target = target.parentElement;
+                    }
+                    
+                    if (target && (target.classList.contains('leaflet-marker-icon') || target.classList.contains('leaflet-marker-shadow'))) {
+                        e.stopPropagation(); // Evitar comportamientos conflictivos
                         
-                        // Intento de recuperación directa:
-                        // Muchos usuarios de htmlwidgets pierden la referencia del objeto L.Marker.
-                        // Pero e.originalEvent.target suele ser el mismo elemento HTML.
+                        // Intentar recuperar el layer asociado al clickeado
+                        let markerLayer = null;
                         
-                        // Vamos a asumir que si encontramos la instancia, podemos iterar sus capas
-                        // O mejor aún: ¿Puede el usuario pasar lat/lng desde R? 
-                        // Si no, necesitamos sacarlas de algún lado.
+                        // Fallback 1: Verificar si el evento tiene _source (popup ya abierto)
+                        if (e.originalEvent && e.originalEvent._source) {
+                            markerLayer = e.originalEvent._source;
+                        }
                         
-                        // SOLUCIÓN DE EMERGENCIA: Si tenemos el elemento DOM (target), 
-                        // ¿podemos sacarle la posición visual? No fácil.
-                        
-                        // MEJOR ESTRATEGIA: 
-                        // Si tenemos mapInstance, intentamos ver si el evento trae el layer.
-                        // Si no, usamos un truco: buscar en el LayerManager del mapa por ID si existiera.
-                        
-                        // Pero hay una forma más simple: 
-                        // Si el widget se renderizó con datos lat/lng, esos datos están en el mundo JS.
-                        // Si no los tenemos, no hay forma mágica sin acceder al LayerManager interno.
-                        
-                        // Vamos a intentar acceder al LayerManager interno de Map (estándar en Leaflet)
-                        if (mapInstance.layerManager && mapInstance.layerManager._byCategory) {
-                            const markers = mapInstance.layerManager._byCategory['marker'];
-                            
+                        // Fallback 2: Buscar en LayerManager interno
+                        if (!markerLayer && mapInst.layerManager && mapInst.layerManager._byCategory) {
+                            const markers = mapInst.layerManager._byCategory['marker'];
                             if (markers) {
-                                // Iterar sobre las claves (stamp) del mapa interno
                                 for (const stamp in markers) {
                                     const layerInfo = markers[stamp];
-                                    const layer = layerInfo.layer || layerInfo; // Extraer capa real
+                                    const layer = layerInfo.layer || layerInfo;
                                     
-                                    // Comparar si el elemento DOM del layer coincide con nuestro target
-                                    // El elemento DOM del marcador suele estar en _icon o _shadow
                                     if ((layer._icon && layer._icon === target) || 
                                         (layer._shadow && layer._shadow === target)) {
                                         markerLayer = layer;
@@ -5399,39 +5372,35 @@ function asArray(value) {
                                 }
                             }
                         }
+                        
+                        if (markerLayer && typeof markerLayer.getLatLng === 'function') {
+                            const latLng = markerLayer.getLatLng();
+                            console.log(`📍 Marcador click: [${latLng.lat.toFixed(4)}, ${latLng.lng.toFixed(4)}]`);
+                            
+                            // Crear popup con carga temporal
+                            const loadingContent = "<div style='padding:10px'><i>Cargando datos climáticos...</i></div>";
+                            const popup = L.popup().setLatLng(latLng).setContent(loadingContent);
+                            popup.addTo(mapInst);
+                            
+                            // Obtener y actualizar contenido
+                            const weatherHtml = await window.fetchWeatherData(latLng.lat, latLng.lng);
+                            popup.setContent(weatherHtml);
+                            
+                        } else {
+                            console.error("❌ No se pudo identificar el marcador. Try manual method.");
+                            alert("Click registrado pero no se pudo extraer coordenadas.");
+                        }
                     }
-                    
-                    if (markerLayer && typeof markerLayer.getLatLng === 'function') {
-                        const latLng = markerLayer.getLatLng();
-                        console.log(`📍 Click en marcador: ${latLng.lat}, ${latLng.lng}`);
-                        
-                        // Mostrar estado de carga temporal
-                        const loadingPopup = L.popup()
-                            .setLatLng(latLng)
-                            .setContent("<i>Cargando clima...</i>")
-                            .openOn(mapInstance);
-                        
-                        // Fetch datos
-                        const weatherHtml = await window.loadMarkerWeather(latLng.lat, latLng.lng);
-                        
-                        // Actualizar contenido del popup
-                        loadingPopup.setContent(weatherHtml);
-                        
-                    } else {
-                        console.error("❌ No se pudo recuperar el objeto Layer de Leaflet para este marcador.");
-                        alert("Error: No se pudo identificar el punto. (Verifica consola)");
-                    }
-                }
-            }, true); // Captura fase
-            
-            clearInterval(checkAndAttach);
+                }, true);
+                
+                clearInterval(checkAndSetup);
+            }
         } else if (attempts >= maxAttempts) {
-            console.warn("⚠️ Timeout: No se encontró el contenedor del mapa.");
-            clearInterval(checkAndAttach);
+            console.warn("⚠️ Timeout máximo alcanzado sin encontrar el mapa.");
+            clearInterval(checkAndSetup);
         }
         attempts++;
-    }, 200);
-
+    }, 150);
 })();
 </script>
 </body>
